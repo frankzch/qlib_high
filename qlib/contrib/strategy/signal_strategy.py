@@ -292,6 +292,9 @@ class TopkDropoutStrategy(BaseSignalStrategy):
                 direction=Order.BUY,  # 1 for buy
             )
             buy_order_list.append(buy_order)
+        
+        print("value=",current_temp.calculate_value(),trade_start_time)
+                    
         return TradeDecisionWO(sell_order_list + buy_order_list, self)
 
 
@@ -520,3 +523,136 @@ class EnhancedIndexingStrategy(WeightStrategyBase):
             self.logger.info("total holding weight: {:.6f}".format(weight.sum()))
 
         return target_weight_position
+
+
+class CustomSignalStrategy(BaseSignalStrategy):
+    def __init__(
+        self,
+        *,
+        topk,
+        n_drop,
+        allow_sell_open=False,
+        hold_thresh=1,
+        only_tradable=False,
+        forbid_all_trade_at_limit=True,
+        **kwargs,
+    ):
+        """
+        Parameters
+        -----------
+        topk : int
+            the number of stocks in the portfolio.
+        n_drop : int
+            number of stocks to be replaced in each trading date.
+        allow_sell_open : bool
+            whether to allow short selling.
+        hold_thresh : int
+            minimum holding days before selling stock.
+        only_tradable : bool
+            whether the strategy should only consider tradable stocks.
+        forbid_all_trade_at_limit : bool
+            whether to forbid all trades when limit_up or limit_down is reached.
+        """
+        super().__init__(**kwargs)
+        self.topk = topk
+        self.n_drop = n_drop
+        self.allow_sell_open = allow_sell_open
+        self.hold_thresh = hold_thresh
+        self.only_tradable = only_tradable
+        self.forbid_all_trade_at_limit = forbid_all_trade_at_limit
+
+    def generate_trade_decision(self, execute_result=None):
+        trade_step = self.trade_calendar.get_trade_step()
+        trade_start_time, trade_end_time = self.trade_calendar.get_step_time(trade_step)
+        pred_start_time, pred_end_time = self.trade_calendar.get_step_time(trade_step, shift=1)
+        pred_score = self.signal.get_signal(start_time=pred_start_time, end_time=pred_end_time)
+        
+        if isinstance(pred_score, pd.DataFrame):
+            pred_score = pred_score.iloc[:, 0]
+        if pred_score is None:
+            return TradeDecisionWO([], self)
+
+        current_temp: Position = copy.deepcopy(self.trade_position)
+        sell_order_list = []
+        buy_order_list = []
+        
+        buy=[]
+        sell=[]
+        cash = current_temp.get_cash()
+        current_stock_list = current_temp.get_stock_list()
+
+        last = pred_score.reindex(current_stock_list).sort_values(ascending=False).index
+        
+        print("Predict value=",pred_score,trade_start_time)
+        if not self.allow_sell_open:
+            # Logic for non-short-selling
+            sell_candidates = last[(pred_score[last] < 0) | (~last.isin(pred_score.nlargest(self.topk).index))]
+            
+            if(len(sell_candidates)> 0):
+                # 步骤1：获取分数对应的位置索引 
+                score_subset = pred_score.loc[sell_candidates]   # 通过.loc确保标签索引 
+                nsmallest_indices = score_subset.nsmallest(self.n_drop).index  
+                 
+                # 步骤2：将字符串索引转换为位置坐标 
+                position_indices = [score_subset.index.get_loc(i)  for i in nsmallest_indices]
+                 
+                # 步骤3：安全访问数组 
+                sell = sell_candidates[position_indices]
+                    
+            buy_candidates = pred_score[(pred_score > 0) & (~pred_score.index.isin(last))]
+            buy = buy_candidates.nlargest(self.topk - len(last) + len(sell)).index
+        else:
+            # Logic for allowing short-selling
+            long_positions = [code for code in current_stock_list if current_temp.get_stock_amount(code) > 0]
+            short_positions = [code for code in current_stock_list if current_temp.get_stock_amount(code) < 0]
+
+            # Sell logic for long positions
+            sell_long = [code for code in long_positions if pred_score[code] < 0]
+            remaining_to_sell = self.topk - len(short_positions)
+            additional_sell = pred_score[(pred_score < 0) & (~pred_score.index.isin(short_positions))].nsmallest(remaining_to_sell).index
+            sell = pd.Index(sell_long).union(additional_sell)
+
+            # Buy logic for short positions
+            buy_short = [code for code in short_positions if pred_score[code] > 0]
+            remaining_to_buy = self.topk - len(long_positions)
+            additional_buy = pred_score[(pred_score > 0) & (~pred_score.index.isin(long_positions))].nlargest(remaining_to_buy).index
+            buy = pd.Index(buy_short).union(additional_buy)
+
+        for code in current_stock_list:
+            if code in sell:
+                sell_price = self.trade_exchange.get_deal_price(code, trade_start_time, trade_end_time, OrderDir.SELL)
+                factor = self.trade_exchange.get_factor(code, trade_start_time, trade_end_time)
+                time_per_step = self.trade_calendar.get_freq()
+                if current_temp.get_stock_count(code, bar=time_per_step) < self.hold_thresh:
+                    continue
+                sell_amount = current_temp.get_stock_amount(code)
+                sell_order = Order(
+                    stock_id=code,
+                    amount=sell_amount,
+                    start_time=trade_start_time,
+                    end_time=trade_end_time,
+                    direction=Order.SELL,
+                )
+                if self.trade_exchange.check_order(sell_order):
+                    sell_order_list.append(sell_order)
+                    cash += self.trade_exchange.deal_order(sell_order, position=current_temp)[0]
+                    
+                    print("Sell value=",current_temp.calculate_value(),"amount=",round(sell_amount,1),"price=",round(sell_price/factor, 1),trade_start_time)
+        
+        value = cash * self.risk_degree / len(buy) if len(buy) > 0 else 0
+        for code in buy:
+            buy_price = self.trade_exchange.get_deal_price(code, trade_start_time, trade_end_time, OrderDir.BUY)
+            buy_amount = value / buy_price
+            factor = self.trade_exchange.get_factor(code, trade_start_time, trade_end_time)
+            buy_amount = self.trade_exchange.round_amount_by_trade_unit(buy_amount, factor)
+            buy_order = Order(
+                stock_id=code,
+                amount=buy_amount,
+                start_time=trade_start_time,
+                end_time=trade_end_time,
+                direction=Order.BUY,
+            )
+            buy_order_list.append(buy_order)
+            print("Buy value=",current_temp.calculate_value(),"amount=",round(buy_amount,1),"price=",round(buy_price/factor, 1),trade_start_time)
+            
+        return TradeDecisionWO(sell_order_list + buy_order_list, self)

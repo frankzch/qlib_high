@@ -370,6 +370,18 @@ class SubplotsGraph:
 
             for _g_obj in _graph_data:
                 self._figure.add_trace(_g_obj, row=row, col=col)
+            
+            self._figure.update_xaxes(
+                nticks=10,
+                tickangle=-45,
+                dtick="M3",
+                type="date",
+                tickformat= "%Y-%m-%d",
+                tickmode= "linear",
+                row=row,
+                col=col
+            )
+            
 
         if self._sub_graph_layout is not None:
             for k, v in self._sub_graph_layout.items():

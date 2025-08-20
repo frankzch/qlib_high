@@ -151,6 +151,7 @@ class RollingGen(TaskGen):
         train_key="train",
         trunc_days: int = None,
         task_copy_func: Callable = copy.deepcopy,
+        freq: str = "day",
     ):
         """
         Generate tasks for rolling
@@ -172,7 +173,7 @@ class RollingGen(TaskGen):
         self.step = step
         self.rtype = rtype
         self.ds_extra_mod_func = ds_extra_mod_func
-        self.ta = TimeAdjuster(future=True)
+        self.ta = TimeAdjuster(future=True, freq=freq)
 
         self.test_key = test_key
         self.train_key = train_key
@@ -214,8 +215,10 @@ class RollingGen(TaskGen):
                         rtype = self.ta.SHIFT_SD
                     # shift the segments data
                     segments[k] = self.ta.shift(seg, step=self.step, rtype=rtype)
-                if segments[self.test_key][0] > test_end:
+                if segments[self.test_key][0] is None:
                     break
+                if segments[self.test_key][1] is None:
+                    segments[self.test_key]= (segments[self.test_key][0],test_end)
             except KeyError:
                 # We reach the end of tasks
                 # No more rolling

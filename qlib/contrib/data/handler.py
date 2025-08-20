@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from qlib.contrib.data.loader import Alpha158DL, Alpha360DL
+from qlib.contrib.data.loader import Alpha158DL, Alpha360DL,Alpha158DLCrypto
 from ...data.dataset.handler import DataHandlerLP
 from ...data.dataset.processor import Processor
 from ...utils import get_callable_kwargs
@@ -35,13 +35,15 @@ def check_transform_proc(proc_l, fit_start_time, fit_end_time):
 
 
 _DEFAULT_LEARN_PROCESSORS = [
-    {"class": "DropnaLabel"},
-    {"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
+    #{"class": "DropnaLabel"},
+    #{"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
 ]
 _DEFAULT_INFER_PROCESSORS = [
-    {"class": "ProcessInf", "kwargs": {}},
-    {"class": "ZScoreNorm", "kwargs": {}},
-    {"class": "Fillna", "kwargs": {}},
+    #{"class": "DropnaProcessor"},
+    #{"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
+    #{"class": "ProcessInf", "kwargs": {}},
+    #{"class": "ZScoreNorm", "kwargs": {}},
+    #{"class": "Fillna", "kwargs": {}},
 ]
 
 
@@ -144,14 +146,27 @@ class Alpha158(DataHandlerLP):
                 "windows": [0],
                 "feature": ["OPEN", "HIGH", "LOW", "VWAP"],
             },
-            "rolling": {},
+            "rolling": {"windows":[5,10,20,30]},
+            #"basic": {},
         }
         return Alpha158DL.get_feature_config(conf)
 
     def get_label_config(self):
-        return ["Ref($close, -2)/Ref($close, -1) - 1"], ["LABEL0"]
+        return ["Ref($close, -4)/Ref($close, -1) - 1"], ["LABEL0"]
+        #return ["(Ref($close, -6)/Ref($close, -1) - 1)/Std((Ref($close, -2)/Ref($close, -1)-1), 5)"], ["LABEL0"]
 
 
 class Alpha158vwap(Alpha158):
+    def get_label_config(self):
+        return ["Ref($vwap, -3)/Ref($vwap, -1) - 1"], ["LABEL0"]
+        
+
+class Alpha158Crypto(Alpha158):
+    def get_feature_config(self):
+        conf = {
+            "rolling": {"windows":[5,10,20,30]},
+        }
+        return Alpha158DLCrypto.get_feature_config(conf)
+
     def get_label_config(self):
         return ["Ref($vwap, -2)/Ref($vwap, -1) - 1"], ["LABEL0"]

@@ -614,12 +614,21 @@ class Indicator:
         show_indicator = indicator_config.get("show_indicator", False)
         ffr_config = indicator_config.get("ffr_config", {})
         pa_config = indicator_config.get("pa_config", {})
-        fulfill_rate = self._cal_trade_fulfill_rate(method=ffr_config.get("weight_method", "mean"))
-        price_advantage = self._cal_trade_price_advantage(method=pa_config.get("weight_method", "mean"))
-        positive_rate = self._cal_trade_positive_rate()
-        deal_amount = self._cal_deal_amount()
-        trade_value = self._cal_trade_value()
-        order_count = self._cal_trade_order_count()
+
+        fulfill_rate= 1
+        price_advantage=0
+        positive_rate=0
+        deal_amount=0
+        trade_value=0
+        order_count=0
+        pa = self.order_indicator.get_index_data("pa")
+        if len(pa) > 0:
+            fulfill_rate = self._cal_trade_fulfill_rate(method=ffr_config.get("weight_method", "mean"))
+            price_advantage = self._cal_trade_price_advantage(method=pa_config.get("weight_method", "mean"))
+            positive_rate = self._cal_trade_positive_rate()
+            deal_amount = self._cal_deal_amount()
+            trade_value = self._cal_trade_value()
+            order_count = self._cal_trade_order_count()
         self.trade_indicator["ffr"] = fulfill_rate
         self.trade_indicator["pa"] = price_advantage
         self.trade_indicator["pos"] = positive_rate

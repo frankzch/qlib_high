@@ -51,6 +51,7 @@ def _exe_task(task_config: dict):
     # this dataset is saved for online inference. So the concrete data should not be dumped
     dataset.config(dump_all=False, recursive=True)
     R.save_objects(**{"dataset": dataset})
+    R.save_objects(trained_model=model)
     # fill placehorder
     placehorder_value = {"<MODEL>": model, "<DATASET>": dataset}
     task_config = fill_placeholder(task_config, placehorder_value)
@@ -240,9 +241,7 @@ class TrainerR(Trainer):
         self.train_func = train_func
         self._call_in_subproc = call_in_subproc
 
-    def train(
-        self, tasks: list, train_func: Optional[Callable] = None, experiment_name: Optional[str] = None, **kwargs
-    ) -> List[Recorder]:
+    def train(self, tasks: list, train_func: Callable = None, experiment_name: str = None, **kwargs) -> List[Recorder]:
         """
         Given a list of `tasks` and return a list of trained Recorder. The order can be guaranteed.
 
