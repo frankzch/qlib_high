@@ -217,7 +217,7 @@ class RollingGen(TaskGen):
                     segments[k] = self.ta.shift(seg, step=self.step, rtype=rtype)
                 if segments[self.test_key][0] is None:
                     break
-                if segments[self.test_key][1] is None:
+                if segments[self.test_key][0] is not None and segments[self.test_key][1] is None:
                     segments[self.test_key]= (segments[self.test_key][0],test_end)
             except KeyError:
                 # We reach the end of tasks
