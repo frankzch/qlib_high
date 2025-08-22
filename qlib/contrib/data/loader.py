@@ -198,10 +198,10 @@ class Alpha158DL(QlibDataLoader):
                 # Large value suggest downward momemtum.
                 fields += ["(IdxMax($high, %d)-IdxMin($low, %d))/%d" % (d, d, d) for d in windows]
                 names += ["IMXD%d" % d for d in windows]
-            if use("CORR"):
+            #if use("CORR"):
                 # The correlation between absolute close price and log scaled trading volume
-                fields += ["Corr($close, Log($volume+1), %d)" % d for d in windows]
-                names += ["CORR%d" % d for d in windows]
+            #    fields += ["Corr($close, Log($volume+1), %d)" % d for d in windows]
+            #    names += ["CORR%d" % d for d in windows]
             if use("CORD"):
                 # The correlation between price change ratio and volume change ratio
                 fields += ["Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), %d)" % d for d in windows]
