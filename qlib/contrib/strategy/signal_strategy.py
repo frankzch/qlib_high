@@ -20,6 +20,7 @@ from qlib.log import get_module_logger
 from qlib.utils import get_pre_trading_date, load_dataset
 from qlib.contrib.strategy.order_generator import OrderGenerator, OrderGenWOInteract
 from qlib.contrib.strategy.optimizer import EnhancedIndexingOptimizer
+from collections import deque
 
 
 class BaseSignalStrategy(BaseStrategy, ABC):
@@ -531,6 +532,7 @@ class CustomSignalStrategy(BaseSignalStrategy):
         *,
         topk,
         n_drop,
+        max_signal_in_queue=10,
         allow_sell_open=False,
         hold_thresh=1,
         only_tradable=False,
@@ -560,6 +562,8 @@ class CustomSignalStrategy(BaseSignalStrategy):
         self.hold_thresh = hold_thresh
         self.only_tradable = only_tradable
         self.forbid_all_trade_at_limit = forbid_all_trade_at_limit
+        self.positive_pred_queue= deque(maxlen=max_signal_in_queue)
+        self.negative_pred_queue= deque(maxlen=max_signal_in_queue)
 
     def generate_trade_decision(self, execute_result=None):
         trade_step = self.trade_calendar.get_trade_step()
@@ -571,6 +575,21 @@ class CustomSignalStrategy(BaseSignalStrategy):
             pred_score = pred_score.iloc[:, 0]
         if pred_score is None:
             return TradeDecisionWO([], self)
+        
+        score_value= pred_score.values[0]
+        if(score_value> 0):
+            self.positive_pred_queue.append(score_value)
+        else:
+            self.negative_pred_queue.append(score_value)
+
+        positive_median_pred=0
+        if(len(self.positive_pred_queue)>0):
+            sorted_desc = sorted(self.positive_pred_queue, reverse=True)
+            positive_median_pred=sorted_desc[int(len(self.positive_pred_queue) * 0.2) ]
+        negative_median_pred=0
+        if(len(self.negative_pred_queue)>0):
+            sorted_desc = sorted(self.negative_pred_queue, reverse=False)
+            negative_median_pred=sorted_desc[int(len(self.negative_pred_queue) * 0.2) ]
 
         current_temp: Position = copy.deepcopy(self.trade_position)
         sell_order_list = []
@@ -583,10 +602,13 @@ class CustomSignalStrategy(BaseSignalStrategy):
 
         last = pred_score.reindex(current_stock_list).sort_values(ascending=False).index
         
-        print("Predict value=",pred_score,trade_start_time)
+        #print(f"pred_score={pred_score} trade_start_time={trade_start_time} p_median={positive_median_pred} n_median={negative_median_pred}")
         if not self.allow_sell_open:
             # Logic for non-short-selling
-            sell_candidates = last[(pred_score[last] < 0) | (~last.isin(pred_score.nlargest(self.topk).index))]
+            sell_pred_score= 0
+            if(len(current_stock_list)> 0 and current_temp.get_stock_price(current_stock_list[0])< self.trade_exchange.get_deal_price(current_stock_list[0], trade_start_time, trade_end_time, OrderDir.SELL)):
+                sell_pred_score= negative_median_pred
+            sell_candidates = last[(pred_score[last] < sell_pred_score) | (~last.isin(pred_score.nlargest(self.topk).index))]
             
             if(len(sell_candidates)> 0):
                 # 步骤1：获取分数对应的位置索引 
@@ -599,7 +621,7 @@ class CustomSignalStrategy(BaseSignalStrategy):
                 # 步骤3：安全访问数组 
                 sell = sell_candidates[position_indices]
                     
-            buy_candidates = pred_score[(pred_score > 0) & (~pred_score.index.isin(last))]
+            buy_candidates = pred_score[(pred_score > positive_median_pred) & (~pred_score.index.isin(last))]
             buy = buy_candidates.nlargest(self.topk - len(last) + len(sell)).index
         else:
             # Logic for allowing short-selling
@@ -637,7 +659,7 @@ class CustomSignalStrategy(BaseSignalStrategy):
                     sell_order_list.append(sell_order)
                     cash += self.trade_exchange.deal_order(sell_order, position=current_temp)[0]
                     
-                    print("Sell value=",current_temp.calculate_value(),"amount=",round(sell_amount,1),"price=",round(sell_price/factor, 1),trade_start_time)
+                    #print("Sell value=",current_temp.calculate_value(),"amount=",round(sell_amount,1),"price=",round(sell_price/factor, 1),trade_start_time)
         
         value = cash * self.risk_degree / len(buy) if len(buy) > 0 else 0
         for code in buy:
@@ -653,6 +675,6 @@ class CustomSignalStrategy(BaseSignalStrategy):
                 direction=Order.BUY,
             )
             buy_order_list.append(buy_order)
-            print("Buy value=",current_temp.calculate_value(),"amount=",round(buy_amount,1),"price=",round(buy_price/factor, 1),trade_start_time)
+            #print("Buy value=",current_temp.calculate_value(),"amount=",round(buy_amount,1),"price=",round(buy_price/factor, 1),trade_start_time)
             
         return TradeDecisionWO(sell_order_list + buy_order_list, self)

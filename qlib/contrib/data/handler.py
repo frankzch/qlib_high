@@ -169,4 +169,4 @@ class Alpha158Crypto(Alpha158):
         return Alpha158DLCrypto.get_feature_config(conf)
 
     def get_label_config(self):
-        return ["Ref($vwap, -2)/Ref($vwap, -1) - 1"], ["LABEL0"]
+        return ["Ref($vwap, -4)/Ref($vwap, -1) - 1"], ["LABEL0"]
