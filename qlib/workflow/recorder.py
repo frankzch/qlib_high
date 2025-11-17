@@ -373,7 +373,7 @@ class MLflowRecorder(Recorder):
         ]:
             try:
                 out = subprocess.check_output(cmd, shell=True)
-                self.client.log_text(self.id, out.decode(), fname)  # this behaves same as above
+                self.client.log_text(self.id, out.decode('utf-8', errors='replace'), fname)  # this behaves same as above
             except subprocess.CalledProcessError:
                 logger.info(f"Fail to log the uncommitted code of $CWD({os.getcwd()}) when run {cmd}.")
 
