@@ -299,6 +299,406 @@ class TopkDropoutStrategy(BaseSignalStrategy):
         return TradeDecisionWO(sell_order_list + buy_order_list, self)
 
 
+class IndustryWeightedTopkStrategy(BaseSignalStrategy):
+    """
+    按行业权重分行业选股策略
+    
+    该策略基于沪深300成分股的行业权重，分行业选取排名靠前的股票进行交易。
+    每个行业按其在沪深300中的权重占比分配资金。
+    """
+    
+    def __init__(
+        self,
+        *,
+        topk,
+        n_drop,
+        industry_file_path=None,
+        index_code='399300.SZ',
+        min_industry_weight=0.01,
+        tushare_token=None,
+        method_sell="bottom",
+        method_buy="top",
+        hold_thresh=1,
+        only_tradable=False,
+        forbid_all_trade_at_limit=True,
+        **kwargs,
+    ):
+        """
+        Parameters
+        -----------
+        topk : int
+            组合中的总股票数量
+        n_drop : int
+            每个交易日替换的股票数量
+        industry_file_path : str
+            行业分类文件路径（行业分类.xlsx）
+        index_code : str
+            指数代码，默认沪深300
+        min_industry_weight : float
+            最小行业权重阈值，低于此值的行业将被删除
+        tushare_token : str
+            tushare API token
+        method_sell : str
+            卖出方法: random/bottom
+        method_buy : str
+            买入方法: random/top
+        hold_thresh : int
+            最小持仓天数
+        only_tradable : bool
+            是否只考虑可交易股票
+        forbid_all_trade_at_limit : bool
+            涨跌停时是否禁止交易
+        """
+        super().__init__(**kwargs)
+        self.topk = topk
+        self.n_drop = n_drop
+        self.method_sell = method_sell
+        self.method_buy = method_buy
+        self.hold_thresh = hold_thresh
+        self.only_tradable = only_tradable
+        self.forbid_all_trade_at_limit = forbid_all_trade_at_limit
+        self.min_industry_weight = min_industry_weight
+        
+        # 设置默认行业文件路径
+        if industry_file_path is None:
+            industry_file_path = os.path.join(os.path.dirname(__file__), '行业分类.xlsx')
+        
+        # 初始化tushare
+        import tushare as ts
+        if tushare_token is None:
+            tushare_token = os.getenv("TUSHARE_TOKEN")
+        ts.set_token(tushare_token)
+        self.pro = ts.pro_api()
+        
+        # 读取行业分类和沪深300权重数据
+        self._load_industry_data(industry_file_path, index_code)
+    
+    def _convert_stock_code(self, code) -> str:
+        """
+        将6位股票代码转换为带交易所前缀的形式（SH 或 SZ）。
+        
+        参数:
+            stock_code (str): 6位数字字符串，如 '600000'
+        
+        返回:
+            str: 带前缀的股票代码，如 'SH600000'；若无法识别则抛出 ValueError
+        """
+        stock_code = (str(code).zfill(6))[:6]
+        
+        if len(stock_code) != 6 or not stock_code.isdigit():
+            return stock_code
+        
+        if stock_code.startswith(('60', '68')):
+            return 'SH' + stock_code
+        elif stock_code.startswith(('00', '30')):
+            return 'SZ' + stock_code
+        else:
+            stock_code
+    
+    def _load_industry_data(self, industry_file_path: str, index_code: str):
+        """加载行业分类和指数权重数据"""
+        # 1. 读取行业分类文件
+        industry_df = pd.read_excel(industry_file_path)
+        industry_df['stock_code'] = industry_df['证券代码'].apply(self._convert_stock_code)
+        industry_df = industry_df[['stock_code', '中证一级行业分类简称']].rename(
+            columns={'中证一级行业分类简称': 'industry'}
+        )
+        
+        # 2. 获取沪深300成分股权重
+        weight_df = self.pro.index_weight(index_code=index_code)
+        weight_df['con_code'] = weight_df['con_code'].apply(self._convert_stock_code)
+        if weight_df is None or len(weight_df) == 0:
+            raise ValueError(f"无法获取指数{index_code}的成分股权重数据")
+        
+        # 取最新一期数据
+        latest_date = weight_df['trade_date'].max()
+        weight_df = weight_df[weight_df['trade_date'] == latest_date][['con_code', 'weight']]
+        weight_df = weight_df.rename(columns={'con_code': 'stock_code'})
+        
+        # 3. 合并行业分类与权重数据
+        merged_df = weight_df.merge(industry_df, on='stock_code', how='left')
+        merged_df = merged_df.dropna(subset=['industry'])
+        
+        # 4. 计算每个行业的权重占比
+        industry_weight = merged_df.groupby('industry')['weight'].sum()
+        total_weight = industry_weight.sum()
+        industry_weight_ratio = industry_weight / total_weight
+        
+        # 5. 过滤权重小于阈值的行业
+        valid_industries = industry_weight_ratio[industry_weight_ratio >= self.min_industry_weight]
+        
+        # 6. 重新计算过滤后的权重比例（归一化）
+        valid_weight_ratio = valid_industries / valid_industries.sum()
+        
+        # 7. 构建行业数据结构
+        self.industry_data = {}
+        for industry in valid_weight_ratio.index:
+            industry_stocks = merged_df[merged_df['industry'] == industry]['stock_code'].tolist()
+            stock_count = len(industry_stocks)
+            topk_industry = max(1, round(stock_count * self.topk / 300))
+            
+            self.industry_data[industry] = {
+                'weight': valid_weight_ratio[industry],
+                'topk_industry': topk_industry,
+                'stocks': industry_stocks,
+                'n_drop_industry': max(1, round(self.n_drop * valid_weight_ratio[industry])),
+            }
+        
+        # 保存成分股列表用于后续验证
+        self.index_stocks = set(weight_df['stock_code'].tolist())
+        
+        print(f"[IndustryWeightedTopkStrategy] 加载了{len(self.industry_data)}个行业:")
+        for ind, data in self.industry_data.items():
+            print(f"  {ind}: 权重={data['weight']:.2%}, topk={data['topk_industry']}, 股票数={len(data['stocks'])}")
+    
+    def _get_deal_price_safe(self, stock_id, start_time, end_time, direction):
+        """安全获取成交价格，失败时使用前一天收盘价"""
+        try:
+            price = self.trade_exchange.get_deal_price(
+                stock_id=stock_id,
+                start_time=start_time,
+                end_time=end_time,
+                direction=direction
+            )
+            if price is not None and not np.isnan(price):
+                return price
+        except Exception:
+            pass
+        
+        # 获取前一天收盘价
+        try:
+            from qlib.utils import get_pre_trading_date
+            pre_date = get_pre_trading_date(start_time, future=True)
+            price = self.trade_exchange.get_deal_price(
+                stock_id=stock_id,
+                start_time=pre_date,
+                end_time=pre_date,
+                direction=direction
+            )
+            if price is not None and not np.isnan(price):
+                return price
+        except Exception:
+            pass
+        
+        return None
+
+    def generate_trade_decision(self, execute_result=None):
+        trade_step = self.trade_calendar.get_trade_step()
+        trade_start_time, trade_end_time = self.trade_calendar.get_step_time(trade_step)
+        pred_start_time, pred_end_time = self.trade_calendar.get_step_time(trade_step, shift=1)
+        pred_score = self.signal.get_signal(start_time=pred_start_time, end_time=pred_end_time)
+        
+        if isinstance(pred_score, pd.DataFrame):
+            pred_score = pred_score.iloc[:, 0]
+        if pred_score is None:
+            return TradeDecisionWO([], self)
+        
+        # 辅助函数
+        if self.only_tradable:
+            def get_first_n(li, n, reverse=False):
+                cur_n = 0
+                res = []
+                for si in reversed(li) if reverse else li:
+                    if self.trade_exchange.is_stock_tradable(
+                        stock_id=si, start_time=trade_start_time, end_time=trade_end_time
+                    ):
+                        res.append(si)
+                        cur_n += 1
+                        if cur_n >= n:
+                            break
+                return res[::-1] if reverse else res
+
+            def get_last_n(li, n):
+                return get_first_n(li, n, reverse=True)
+
+            def filter_stock(li):
+                return [
+                    si for si in li
+                    if self.trade_exchange.is_stock_tradable(
+                        stock_id=si, start_time=trade_start_time, end_time=trade_end_time
+                    )
+                ]
+        else:
+            def get_first_n(li, n):
+                return list(li)[:n]
+
+            def get_last_n(li, n):
+                return list(li)[-n:]
+
+            def filter_stock(li):
+                return li
+
+        current_temp: Position = copy.deepcopy(self.trade_position)
+        sell_order_list = []
+        buy_order_list = []
+        cash = current_temp.get_cash()
+        current_stock_list = current_temp.get_stock_list()
+        
+        # ========== 第一阶段：分行业收集卖出订单 ==========
+        all_sell_stocks = []
+        
+        for industry, ind_data in self.industry_data.items():
+            industry_stocks = ind_data['stocks']
+            topk_industry = ind_data['topk_industry']
+            n_drop_industry = ind_data['n_drop_industry']
+            
+            # 当前持有的该行业股票
+            current_industry_stocks = [s for s in current_stock_list if s in industry_stocks]
+            
+            # 该行业的预测分数
+            industry_pred_score = pred_score[pred_score.index.isin(industry_stocks)]
+            if len(industry_pred_score) == 0:
+                continue
+            
+            # 当前持仓按分数排序
+            last = industry_pred_score.reindex(current_industry_stocks).dropna().sort_values(ascending=False).index
+            
+            # 确定要买入的新股票（不在当前持仓中）
+            if self.method_buy == "top":
+                today = get_first_n(
+                    industry_pred_score[~industry_pred_score.index.isin(last)].sort_values(ascending=False).index,
+                    n_drop_industry + topk_industry - len(last),
+                )
+            elif self.method_buy == "random":
+                topk_candi = get_first_n(industry_pred_score.sort_values(ascending=False).index, topk_industry)
+                candi = list(filter(lambda x: x not in last, topk_candi))
+                n = n_drop_industry + topk_industry - len(last)
+                try:
+                    today = list(np.random.choice(candi, n, replace=False))
+                except ValueError:
+                    today = candi
+            else:
+                raise NotImplementedError(f"不支持的买入方法: {self.method_buy}")
+            
+            # 合并新旧股票，按分数排序
+            comb = industry_pred_score.reindex(last.union(pd.Index(today))).sort_values(ascending=False).index
+            
+            # 确定要卖出的股票
+            if self.method_sell == "bottom":
+                sell = last[last.isin(get_last_n(comb, n_drop_industry))]
+            elif self.method_sell == "random":
+                candi = filter_stock(last)
+                try:
+                    sell = pd.Index(np.random.choice(list(candi), n_drop_industry, replace=False) if len(last) else [])
+                except ValueError:
+                    sell = candi
+            else:
+                raise NotImplementedError(f"不支持的卖出方法: {self.method_sell}")
+            
+            all_sell_stocks.extend(sell.tolist())
+        
+        # ========== 执行卖出订单 ==========
+        for code in current_stock_list:
+            if not self.trade_exchange.is_stock_tradable(
+                stock_id=code,
+                start_time=trade_start_time,
+                end_time=trade_end_time,
+                direction=None if self.forbid_all_trade_at_limit else OrderDir.SELL,
+            ):
+                continue
+            if code in all_sell_stocks:
+                time_per_step = self.trade_calendar.get_freq()
+                if current_temp.get_stock_count(code, bar=time_per_step) < self.hold_thresh:
+                    continue
+                sell_amount = current_temp.get_stock_amount(code=code)
+                sell_order = Order(
+                    stock_id=code,
+                    amount=sell_amount,
+                    start_time=trade_start_time,
+                    end_time=trade_end_time,
+                    direction=Order.SELL,
+                )
+                if self.trade_exchange.check_order(sell_order):
+                    sell_order_list.append(sell_order)
+                    trade_val, trade_cost, trade_price = self.trade_exchange.deal_order(
+                        sell_order, position=current_temp
+                    )
+                    cash += trade_val - trade_cost
+        
+        # ========== 第二阶段：分行业执行买入订单 ==========
+        for industry, ind_data in self.industry_data.items():
+            industry_stocks = ind_data['stocks']
+            topk_industry = ind_data['topk_industry']
+            n_drop_industry = ind_data['n_drop_industry']
+            industry_weight = ind_data['weight']
+            
+            # 该行业可用资金
+            industry_cash = cash * industry_weight * self.risk_degree
+            
+            # 当前持有的该行业股票
+            current_industry_stocks = [s for s in current_temp.get_stock_list() if s in industry_stocks]
+            
+            # 该行业的预测分数
+            industry_pred_score = pred_score[pred_score.index.isin(industry_stocks)]
+            if len(industry_pred_score) == 0:
+                continue
+            
+            # 当前持仓按分数排序
+            last = industry_pred_score.reindex(current_industry_stocks).dropna().sort_values(ascending=False).index
+            
+            # 确定要买入的新股票
+            if self.method_buy == "top":
+                today = get_first_n(
+                    industry_pred_score[~industry_pred_score.index.isin(last)].sort_values(ascending=False).index,
+                    n_drop_industry + topk_industry - len(last),
+                )
+            elif self.method_buy == "random":
+                topk_candi = get_first_n(industry_pred_score.sort_values(ascending=False).index, topk_industry)
+                candi = list(filter(lambda x: x not in last, topk_candi))
+                n = n_drop_industry + topk_industry - len(last)
+                try:
+                    today = list(np.random.choice(candi, n, replace=False))
+                except ValueError:
+                    today = candi
+            else:
+                raise NotImplementedError(f"不支持的买入方法: {self.method_buy}")
+            
+            # 合并新旧，确定卖出
+            comb = industry_pred_score.reindex(last.union(pd.Index(today))).sort_values(ascending=False).index
+            if self.method_sell == "bottom":
+                sell = last[last.isin(get_last_n(comb, n_drop_industry))]
+            else:
+                sell = pd.Index([])
+            
+            # 要买入的股票
+            buy = list(today)[: len(sell) + topk_industry - len(last)]
+            
+            if len(buy) == 0:
+                continue
+            
+            value_per_stock = industry_cash / len(buy)
+            
+            for code in buy:
+                if not self.trade_exchange.is_stock_tradable(
+                    stock_id=code,
+                    start_time=trade_start_time,
+                    end_time=trade_end_time,
+                    direction=None if self.forbid_all_trade_at_limit else OrderDir.BUY,
+                ):
+                    continue
+                
+                buy_price = self._get_deal_price_safe(code, trade_start_time, trade_end_time, OrderDir.BUY)
+                if buy_price is None:
+                    continue
+                
+                buy_amount = value_per_stock / buy_price
+                factor = self.trade_exchange.get_factor(stock_id=code, start_time=trade_start_time, end_time=trade_end_time)
+                buy_amount = self.trade_exchange.round_amount_by_trade_unit(buy_amount, factor)
+                
+                if buy_amount > 0:
+                    buy_order = Order(
+                        stock_id=code,
+                        amount=buy_amount,
+                        start_time=trade_start_time,
+                        end_time=trade_end_time,
+                        direction=Order.BUY,
+                    )
+                    buy_order_list.append(buy_order)
+        
+        print("value=", current_temp.calculate_value(), trade_start_time)
+        return TradeDecisionWO(sell_order_list + buy_order_list, self)
+
+
 class WeightStrategyBase(BaseSignalStrategy):
     # TODO:
     # 1. Supporting leverage the get_range_limit result from the decision
