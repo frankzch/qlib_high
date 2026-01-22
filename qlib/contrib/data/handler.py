@@ -35,15 +35,19 @@ def check_transform_proc(proc_l, fit_start_time, fit_end_time):
 
 
 _DEFAULT_LEARN_PROCESSORS = [
-    #{"class": "DropnaLabel"},
-    #{"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
+    # 市值+行业中性化示例：
+    {"class": "DropnaLabel"},
+    {"class": "CSNeutralize", "module_path": "qlib.contrib.data.processor", "kwargs": {"fields_group": ["label"], "market_cap_col": "total_mv", "industry_col": "industry_id"}},
+    {"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
 ]
 _DEFAULT_INFER_PROCESSORS = [
     #{"class": "DropnaProcessor"},
     #{"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
-    #{"class": "ProcessInf", "kwargs": {}},
     #{"class": "ZScoreNorm", "kwargs": {}},
-    #{"class": "Fillna", "kwargs": {}},
+    {"class": "ProcessInf", "kwargs": {}},
+    {"class": "Fillna", "kwargs": {"fill_value": 0}},
+    # 推理时也需要做相同的中性化处理：
+    {"class": "CSNeutralize", "module_path": "qlib.contrib.data.processor", "kwargs": {"fields_group": ["feature"], "market_cap_col": "total_mv", "industry_col": "industry_id"}},
 ]
 
 
@@ -104,7 +108,7 @@ class Alpha158(DataHandlerLP):
         start_time=None,
         end_time=None,
         freq="day",
-        infer_processors=[],
+        infer_processors=_DEFAULT_INFER_PROCESSORS,
         learn_processors=_DEFAULT_LEARN_PROCESSORS,
         fit_start_time=None,
         fit_end_time=None,
