@@ -36,18 +36,18 @@ def check_transform_proc(proc_l, fit_start_time, fit_end_time):
 
 _DEFAULT_LEARN_PROCESSORS = [
     # 市值+行业中性化示例：
-    {"class": "DropnaLabel"},
-    {"class": "CSNeutralize", "module_path": "qlib.contrib.data.processor", "kwargs": {"fields_group": ["label"], "market_cap_col": "total_mv", "industry_col": "industry_id"}},
-    {"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
+    #{"class": "DropnaLabel"},
+    #{"class": "CSNeutralize", "module_path": "qlib.contrib.data.processor", "kwargs": {"fields_group": ["label"], "market_cap_col": "total_mv", "industry_col": "industry_id"}},
+    #{"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
 ]
 _DEFAULT_INFER_PROCESSORS = [
     #{"class": "DropnaProcessor"},
     #{"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}},
     #{"class": "ZScoreNorm", "kwargs": {}},
-    {"class": "ProcessInf", "kwargs": {}},
-    {"class": "Fillna", "kwargs": {"fill_value": 0}},
+    #{"class": "ProcessInf", "kwargs": {}},
+    #{"class": "Fillna", "kwargs": {"fill_value": 0}},
     # 推理时也需要做相同的中性化处理：
-    {"class": "CSNeutralize", "module_path": "qlib.contrib.data.processor", "kwargs": {"fields_group": ["feature"], "market_cap_col": "total_mv", "industry_col": "industry_id"}},
+    #{"class": "CSNeutralize", "module_path": "qlib.contrib.data.processor", "kwargs": {"fields_group": ["feature"], "market_cap_col": "total_mv", "industry_col": "industry_id"}},
 ]
 
 

@@ -299,13 +299,12 @@ class TopkDropoutStrategy(BaseSignalStrategy):
         return TradeDecisionWO(sell_order_list + buy_order_list, self)
 
 
-class NeutralizedTopkStrategy(BaseSignalStrategy):
+class IndustryWeightedTopkStrategy(BaseSignalStrategy):
     """
-    行业和市值中性化选股策略
+    按行业权重分行业选股策略
     
-    该策略基于沪深300成分股的行业权重和个股权重：
-    1. 行业间：资金分配与基准指数（如沪深300）的行业权重一致（行业中性）。
-    2. 行业内：选中股票的资金分配与其在基准指数中的权重成正比（主要通过市值加权）。
+    该策略基于沪深300成分股的行业权重，分行业选取排名靠前的股票进行交易。
+    每个行业按其在沪深300中的权重占比分配资金。
     """
     
     def __init__(
@@ -377,6 +376,12 @@ class NeutralizedTopkStrategy(BaseSignalStrategy):
     def _convert_stock_code(self, code) -> str:
         """
         将6位股票代码转换为带交易所前缀的形式（SH 或 SZ）。
+        
+        参数:
+            stock_code (str): 6位数字字符串，如 '600000'
+        
+        返回:
+            str: 带前缀的股票代码，如 'SH600000'；若无法识别则抛出 ValueError
         """
         stock_code = (str(code).zfill(6))[:6]
         
@@ -410,9 +415,6 @@ class NeutralizedTopkStrategy(BaseSignalStrategy):
         weight_df = weight_df[weight_df['trade_date'] == latest_date][['con_code', 'weight']]
         weight_df = weight_df.rename(columns={'con_code': 'stock_code'})
         
-        # 保存个股权重映射 {stock_code: weight}
-        self.stock_weight_map = weight_df.set_index('stock_code')['weight'].to_dict()
-        
         # 3. 合并行业分类与权重数据
         merged_df = weight_df.merge(industry_df, on='stock_code', how='left')
         merged_df = merged_df.dropna(subset=['industry'])
@@ -442,7 +444,10 @@ class NeutralizedTopkStrategy(BaseSignalStrategy):
                 'n_drop_industry': max(1, round(self.n_drop * valid_weight_ratio[industry])),
             }
         
-        print(f"[NeutralizedTopkStrategy] 加载了{len(self.industry_data)}个行业:")
+        # 保存成分股列表用于后续验证
+        self.index_stocks = set(weight_df['stock_code'].tolist())
+        
+        print(f"[IndustryWeightedTopkStrategy] 加载了{len(self.industry_data)}个行业:")
         for ind, data in self.industry_data.items():
             print(f"  {ind}: 权重={data['weight']:.2%}, topk={data['topk_industry']}, 股票数={len(data['stocks'])}")
     
@@ -610,16 +615,14 @@ class NeutralizedTopkStrategy(BaseSignalStrategy):
                     )
                     cash += trade_val - trade_cost
         
-        # ========== 第二阶段：分行业执行买入订单 (市值加权) ==========
+        # ========== 第二阶段：分行业执行买入订单 ==========
         for industry, ind_data in self.industry_data.items():
             industry_stocks = ind_data['stocks']
             topk_industry = ind_data['topk_industry']
             n_drop_industry = ind_data['n_drop_industry']
             industry_weight = ind_data['weight']
             
-            # 该行业可用资金（使用归一化前的权重，或者确保所有行业权重和为1）
-            # 注意：这里的industry_weight已经是归一化后的（sum=1）
-            # 所以 industry_cash = 总资金 * 行业权重
+            # 该行业可用资金
             industry_cash = cash * industry_weight * self.risk_degree
             
             # 当前持有的该行业股票
@@ -657,27 +660,13 @@ class NeutralizedTopkStrategy(BaseSignalStrategy):
             else:
                 sell = pd.Index([])
             
-            # 最终确定的买入/持有列表
+            # 要买入的股票
             buy = list(today)[: len(sell) + topk_industry - len(last)]
             
             if len(buy) == 0:
                 continue
             
-            # --- 市值加权分配 ---
-            # 获取选中股票的权重
-            buy_weights = {code: self.stock_weight_map.get(code, 0) for code in buy}
-            total_buy_weight = sum(buy_weights.values())
-            
-            if total_buy_weight <= 0:
-                # 兜底：如果无法获取权重，则等权分配
-                value_per_stock = industry_cash / len(buy)
-                weight_allocation = {code: value_per_stock for code in buy}
-            else:
-                # 按权重分配资金
-                weight_allocation = {
-                    code: industry_cash * (w / total_buy_weight) 
-                    for code, w in buy_weights.items()
-                }
+            value_per_stock = industry_cash / len(buy)
             
             for code in buy:
                 if not self.trade_exchange.is_stock_tradable(
@@ -688,16 +677,11 @@ class NeutralizedTopkStrategy(BaseSignalStrategy):
                 ):
                     continue
                 
-                # 获取该股票分配的资金
-                stock_value = weight_allocation.get(code, 0)
-                if stock_value <= 0:
-                    continue
-                
                 buy_price = self._get_deal_price_safe(code, trade_start_time, trade_end_time, OrderDir.BUY)
                 if buy_price is None:
                     continue
                 
-                buy_amount = stock_value / buy_price
+                buy_amount = value_per_stock / buy_price
                 factor = self.trade_exchange.get_factor(stock_id=code, start_time=trade_start_time, end_time=trade_end_time)
                 buy_amount = self.trade_exchange.round_amount_by_trade_unit(buy_amount, factor)
                 
@@ -713,6 +697,7 @@ class NeutralizedTopkStrategy(BaseSignalStrategy):
         
         print("value=", current_temp.calculate_value(), trade_start_time)
         return TradeDecisionWO(sell_order_list + buy_order_list, self)
+
 
 
 class WeightStrategyBase(BaseSignalStrategy):
